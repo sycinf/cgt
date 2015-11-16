@@ -4,7 +4,7 @@ import ctypes, os.path as osp, hashlib, numpy as np, sys, subprocess, string, os
 from collections import defaultdict, namedtuple
 from StringIO import StringIO
 import logging
-
+functionNum = 0
 def function(inputs, outputs, dbg=None, updates=None, givens=None):
     assert isinstance(inputs, list), "Inputs must be a list"
     assert all(el.is_argument() for el in inputs), "Invalid input: should be a list of Argument nodes"
@@ -248,7 +248,7 @@ def create_execution_graph(inputs, nodes_sorted, node2shape, node2memowner, node
     return ExecutionGraph(instrs, len(inputs), counter.count), node2memloc
 
 
-def get_callable(op, input_types, devtype, prefer_python=False):
+def get_callable(op, input_types, devtype, prefer_python=False, generating_codetext=False, prev_ncis=[]):
     assert op.available_impls, "need to set op.available_impls"
     config = core.get_config()
     if (prefer_python or config["force_python_impl"]) and "python" in op.available_impls:
@@ -265,6 +265,10 @@ def get_callable(op, input_types, devtype, prefer_python=False):
     else: # backend = native
         if devtype == "cpu":
             if "native_cpu" in op.available_impls:
+                if(generating_codetext):
+                    #just return the string
+                    return generate_native_code(op, input_types,prev_ncis)
+
                 return get_native_callable(op, input_types, "cpu")
             else:
                 print "using python impl for",op
@@ -274,6 +278,18 @@ def get_callable(op, input_types, devtype, prefer_python=False):
                 return get_native_callable(op, input_types, "gpu")
             else:
                 raise RuntimeError("Tried to put Op %s on the GPU but I only have a python impl :("%op)
+
+
+def generate_native_code(op, input_types,prev_nics):
+    nci = op.get_native_compile_info(input_types, "cpu")
+    # we shall check if the include files are already
+    # included, if so, we remove those from the code
+    # we also check if
+    prev_nics.append(nci)
+    nci.op_str = str(op)
+    nci.return_type = op.return_type
+    nci.n_in = len(input_types)
+    return gen_cpustr_from_nci(nci)
 
 def get_native_callable(op, input_types, devtype):
     nci = op.get_native_compile_info(input_types, devtype)
@@ -358,6 +374,46 @@ def run_compilation_pipeline(inputs, outputs, updates, givens):
         print 'begin'
         print '\n'.join(str(i)+'.) \t'+repr(instr) for (i,instr) in enumerate(eg.instrs))
         print 'end'
+    global functionNum
+    funcFileName = 'foo'+str(functionNum)+'.txt'
+    functionNum = functionNum+1
+    fo = open(funcFileName, "w")
+    opOccurrence = {}
+    nci_list=[]
+    for (i,instr) in enumerate(eg.instrs):
+        print '\n'+str(i)+'.) \t'+repr(instr)
+        if isinstance(instr, LoadArgument):
+            print 'load argument'
+            continue
+        if isinstance(instr, Alloc):
+            print 'alloc'
+            continue
+        if isinstance(instr, BuildTup):
+            print 'buildTup'
+            continue
+        if isinstance(instr, ReturnByRef) or isinstance(instr, ReturnByVal)\
+                or isinstance(instr, BuildTup):
+
+            callable_str = get_callable(instr.op, instr.input_types, "cpu", False, True,nci_list)
+            if isinstance(callable_str,basestring):
+                prefix = 'func'+str(i)
+                d = dict(function=_funcname(prefix), closure=_closurename(prefix),setup=_setupname(prefix),teardown=_teardownname(prefix))
+                fn_srcfile = core.SrcFile("c++",string.Template(callable_str).substitute(d))
+                fo.write(' \n')
+                fo.write( fn_srcfile.code)
+                fo.write('\n')
+            else:
+                print 'python implement'
+        else:
+            print 'I dont noe'
+
+
+
+    #    print node.op
+    #    callable = get_callable(node.op, [par.typ for par in node.parents], "cpu")
+        #nci = node.op.get_native_compile_info([par.typ for par in node.parents], "cpu")
+        #template_code = gen_templated_code(nci.includes, nci.closure_triples, nci.func_code)
+        #compile_info = get_compile_info()
 
     # Phase 3: create C or Python interpreter for graph
     # ------------------------------------------------------
@@ -525,6 +581,12 @@ class ReturnByVal(Instr):
 CPP_ABI_VERSION = 1 
 # every time your make changes to internal data structures in cgt_common.h, increment this number
 # to force recompilation of all shared libraries
+
+def gen_cpustr_from_nci(nci):
+    template_code = gen_templated_code(nci.includes, nci.closure_triples, nci.func_code)
+    #compile_info = get_compile_info()
+
+    return template_code
 
 def nci2callable(nci):
     template_code = gen_templated_code(nci.includes, nci.closure_triples, nci.func_code)
