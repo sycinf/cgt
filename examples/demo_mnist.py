@@ -160,8 +160,10 @@ def main():
             train(Xtrain[start:end], ytrain[start:end])
             if args.unittest: return
         elapsed = time.time() - tstart
+        lossstart = time.time()
         trainerr, trainloss = computeloss(Xtrain[:len(Xtest)], ytrain[:len(Xtest)])
         testerr, testloss = computeloss(Xtest, ytest)
+        losselapsed = time.time()-lossstart
         print fmt_row(10, [i_epoch, trainloss, trainerr, testloss, testerr, elapsed])
     if args.profile: cgt.execution.profiler.print_stats()
 

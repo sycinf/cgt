@@ -201,7 +201,7 @@ class MemCounter(object):
         return out
 
 
-def create_execution_graph(inputs, nodes_sorted, node2shape, node2memowner, node2dev):
+def create_execution_graph(inputs, nodes_sorted, node2shape, node2memowner, node2dev, instr2node={}):
     # node2impltype = copy.copy(node2impltype) # we'll insert transport ops
     instrs = []
     counter = MemCounter()
@@ -213,7 +213,9 @@ def create_execution_graph(inputs, nodes_sorted, node2shape, node2memowner, node
             write_loc = counter.new_memloc(node2dev[node].devtype)
             node2memloc[node] = write_loc
             i = inputs.index(node)
-            instrs.append(LoadArgument(i, write_loc))
+            la_instr = LoadArgument(i, write_loc)
+            instr2node[la_instr] = node
+            instrs.append(la_instr)
         else:
             read_locs = [node2memloc[parent] for parent in node.parents]
             if node.op.return_type == "byref":
@@ -221,8 +223,10 @@ def create_execution_graph(inputs, nodes_sorted, node2shape, node2memowner, node
                     if is_tensor(node): # just make one memory location for output
                         nodeshape = node2shape[node] if node.ndim > 0 else []
                         shape_locs = [node2memloc[shpel] for shpel in nodeshape]
-                        write_loc = counter.new_memloc(node2dev[node].devtype)                    
-                        instrs.append(Alloc(node.dtype, shape_locs, write_loc))
+                        write_loc = counter.new_memloc(node2dev[node].devtype)
+                        alloca_instr = Alloc(node.dtype, shape_locs, write_loc)
+                        instr2node[alloca_instr] = node
+                        instrs.append(alloca_instr)
                     else: # if it's a tuple, we need to allocate all of the components, then build tuple
                         nodeshape = node2shape[node]
                         assert isinstance(nodeshape, tuple)
@@ -230,20 +234,28 @@ def create_execution_graph(inputs, nodes_sorted, node2shape, node2memowner, node
                         for (arrshp, arrtyp) in utils.safezip(nodeshape, node.typ):
                             arr_loc = counter.new_memloc(node2dev[node].devtype)
                             shape_locs = [node2memloc[shpel] for shpel in arrshp]
-                            instrs.append(Alloc(arrtyp.dtype, shape_locs, arr_loc))
+                            alloca_instr = Alloc(arrtyp.dtype, shape_locs, arr_loc)
+                            instr2node[alloca_instr] = node
+                            instrs.append(alloca_instr)
                             arr_locs.append(arr_loc)
                         write_loc = counter.new_memloc(node2dev[node].devtype)
-                        instrs.append(BuildTup(node.typ, arr_locs, write_loc))
+                        bt_instr = BuildTup(node.typ, arr_locs, write_loc)
+                        instr2node[bt_instr] = node
+                        instrs.append(bt_instr)
                 else:
                     # If this node writes to another node's memory, the devices must be the same
                     # this should have been enforced in determine_devices()
                     assert node2dev[node] == node2dev[node2memowner[node]]
-                    write_loc = node2memloc[node2memowner[node]]                
-                instrs.append(ReturnByRef(node.op, [par.typ for par in node.parents], read_locs, write_loc, node_props=node.props))
+                    write_loc = node2memloc[node2memowner[node]]
+                rbr_instr = ReturnByRef(node.op, [par.typ for par in node.parents], read_locs, write_loc, node_props=node.props)
+                instr2node[rbr_instr] = node
+                instrs.append(rbr_instr)
             else:
                 assert node.op.return_type == "byval"
                 write_loc = counter.new_memloc(node2dev[node].devtype)
-                instrs.append(ReturnByVal(node.op, [par.typ for par in node.parents], read_locs, write_loc, node_props=node.props))
+                rbv_instr = ReturnByVal(node.op, [par.typ for par in node.parents], read_locs, write_loc, node_props=node.props)
+                instr2node[rbv_instr]=node
+                instrs.append(rbv_instr)
         node2memloc[node] = write_loc
     return ExecutionGraph(instrs, len(inputs), counter.count), node2memloc
 
@@ -325,6 +337,12 @@ def replace_parents(node, before, after):
         if p is before:
             node.parents[i] = after
 
+# here we traverse the entire list of instructions
+# extract the alloc instructions, then trace back
+#
+def pre_allocate_all_memory_space():
+    print 'empty'
+
 def run_compilation_pipeline(inputs, outputs, updates, givens):
     """
     Compiles the expression graph into an execution graph. 
@@ -359,6 +377,20 @@ def run_compilation_pipeline(inputs, outputs, updates, givens):
     # ------------------------------------------------------
     # Sort nodes so that shape elements appear before a given node
     nodes_sorted = topsorted_shapes_first(outputs_updatetargs_simple, analysis["node2shape"]) # XXX don't need shapes for byval ops
+
+    nodeFileName = 'nodeInfo'+'.txt'
+
+    nofo = open(nodeFileName, "w")
+    nodeCount = 0
+    node2s = {}
+    for curNode in nodes_sorted:
+        curStr= cgt.display._get_expr(curNode,node2s)
+        print nodeCount,'\t',curStr
+        nodeCount = nodeCount+1
+        print "\n"
+    instr2node = {}
+
+    print nodeCount,'total number of node'
     # For each node, figure out if its output should be written to a previous node's memory
     # (memowner : "memory owner")
     outputs_simple = outputs_updatetargs_simple[:len(outputs)] # get rid
@@ -367,7 +399,7 @@ def run_compilation_pipeline(inputs, outputs, updates, givens):
     # Find the outputs we want to return
     # Generate execution graph
     eg, node2memloc = create_execution_graph(
-        inputs, nodes_sorted, analysis["node2shape"], node2memowner, node2dev)
+        inputs, nodes_sorted, analysis["node2shape"], node2memowner, node2dev, instr2node)
 
     # print execution graph
     if config["verbose"]:
@@ -380,8 +412,16 @@ def run_compilation_pipeline(inputs, outputs, updates, givens):
     fo = open(funcFileName, "w")
     opOccurrence = {}
     nci_list=[]
+    print instr2node.items()
+
+
+
     for (i,instr) in enumerate(eg.instrs):
         print '\n'+str(i)+'.) \t'+repr(instr)
+        originalnode = instr2node[instr]
+        print originalnode
+        #curStr= cgt.display._get_expr(originalnode,node2s)
+        #print curStr
         if isinstance(instr, LoadArgument):
             print 'load argument'
             continue
@@ -393,7 +433,7 @@ def run_compilation_pipeline(inputs, outputs, updates, givens):
             continue
         if isinstance(instr, ReturnByRef) or isinstance(instr, ReturnByVal)\
                 or isinstance(instr, BuildTup):
-
+            print instr.op.get_name()
             callable_str = get_callable(instr.op, instr.input_types, "cpu", False, True,nci_list)
             if isinstance(callable_str,basestring):
                 prefix = 'func'+str(i)
@@ -406,7 +446,7 @@ def run_compilation_pipeline(inputs, outputs, updates, givens):
                 print 'python implement'
         else:
             print 'I dont noe'
-
+        # we wanna create a summary of what operator to instantiate
 
 
     #    print node.op
