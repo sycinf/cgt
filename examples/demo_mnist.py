@@ -135,6 +135,8 @@ def main():
     cost_nodrop = -cgt.mean(categorical.loglik(y, pofy_nodrop))
     err_nodrop = cgt.cast(cgt.not_equal(y_nodrop, y), cgt.floatX).mean()
 
+
+
     train = cgt.function(inputs=[X, y], outputs=[], updates=updates)
     computeloss = cgt.function(inputs=[X, y], outputs=[err_nodrop,cost_nodrop])
 
@@ -152,20 +154,52 @@ def main():
 
     if args.profile: cgt.profiler.start()
 
+
     print fmt_row(10, ["Epoch","Train NLL","Train Err","Test NLL","Test Err","Epoch Time"])
     for i_epoch in xrange(args.epochs):
         tstart = time.time()
+        oldTrainX = Xtrain[:len(Xtest)]
+        oldTrainY = ytrain[:len(Xtest)]
         for start in xrange(0, Xtrain.shape[0], batch_size):
             end = start+batch_size
+            before = Xtrain[start:end]
+            beforey = ytrain[start:end]
+            myk,myval = updates[0]
+            #print myval
             train(Xtrain[start:end], ytrain[start:end])
+            #print updates[0]
+            after = Xtrain[start:end]
+            aftery = ytrain[start:end]
+            #compareBeforeAfter(before, after, True)
+            #compareBeforeAfter(beforey, aftery, False)
             if args.unittest: return
         elapsed = time.time() - tstart
         lossstart = time.time()
-        trainerr, trainloss = computeloss(Xtrain[:len(Xtest)], ytrain[:len(Xtest)])
+        newTrainX = Xtrain[:len(Xtest)]
+        newTrainY = ytrain[:len(Xtest)]
+        trainerr, trainloss = computeloss(oldTrainX, oldTrainY )
         testerr, testloss = computeloss(Xtest, ytest)
         losselapsed = time.time()-lossstart
         print fmt_row(10, [i_epoch, trainloss, trainerr, testloss, testerr, elapsed])
     if args.profile: cgt.execution.profiler.print_stats()
+
+def compareBeforeAfter(before, after, li):
+    for beforeEle,afterEle in zip(before, after):
+        different = False
+        if li:
+            for beforeEleEle, afterEleEle in zip(beforeEle, afterEle):
+                if beforeEleEle!=afterEleEle:
+                    different = True
+                    break
+
+        else:
+            if beforeEle != afterEle:
+                different = True
+                break;
+        if different:
+            print '!=', before, after
+            break
+
 
 if __name__ == "__main__":
     main()

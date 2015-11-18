@@ -84,7 +84,53 @@ def is_tensor(x):
 def is_tuple(x):
     return isinstance(x.typ, core.TupleType)
 
-def create_interpreter(inputs, outputs, eg, node2memloc):
+
+def generate_unified_function(eg,instr2node,inplaceoutNode):
+    global functionNum
+    funcFileName = 'foo'+str(functionNum)+'.txt'
+    functionNum = functionNum+1
+    fo = open(funcFileName, "w")
+    opOccurrence = {}
+    nci_list=[]
+    print instr2node.items()
+    for (i,instr) in enumerate(eg.instrs):
+        print '\n'+str(i)+'.) \t'+repr(instr)
+        originalnode = instr2node[instr]
+        print originalnode
+        if inplaceoutNode.__contains__(originalnode):
+            print 'needs to be written to...'
+        #curStr= cgt.display._get_expr(originalnode,node2s)
+        #print curStr
+        if isinstance(instr, LoadArgument):
+            print 'load argument'
+            # this is just load from input arg
+
+            continue
+        if isinstance(instr, Alloc):
+            print 'alloc'
+            continue
+        if isinstance(instr, BuildTup):
+            print 'buildTup'
+            continue
+        if isinstance(instr, ReturnByRef) or isinstance(instr, ReturnByVal):
+            print instr.op.get_name()
+            callable_str = get_callable(instr.op, instr.input_types, "cpu", False, True,nci_list)
+            if isinstance(callable_str,basestring):
+                prefix = 'func'+str(i)
+                d = dict(function=_funcname(prefix), closure=_closurename(prefix),setup=_setupname(prefix),teardown=_teardownname(prefix))
+                fn_srcfile = core.SrcFile("c++",string.Template(callable_str).substitute(d))
+                fo.write(' \n')
+                fo.write( fn_srcfile.code)
+                fo.write('\n')
+            else:
+                print 'python implement'
+        else:
+            print 'I dont noe'
+        # we wanna create a summary of what operator to instantiate
+    # we generate the unified c function
+
+
+def create_interpreter(inputs, outputs, eg, node2memloc, inst2node={}, inplaceoutNode = []):
     assert isinstance(eg, ExecutionGraph)
     input_types = [input.typ for input in inputs] #pylint: disable=W0622
     output_locs = [node2memloc[node] for node in outputs]
@@ -102,6 +148,9 @@ def create_interpreter(inputs, outputs, eg, node2memloc):
         if parallel:
             return cgt.cycgt.CppInterpreterWrapper(eg, input_types, output_locs, config["num_threads"])
         else:
+            if config.has_key("unified"):
+                if config["unified"]:
+                    generate_unified_function(eg,inst2node,inplaceoutNode)
             return cgt.cycgt.CppInterpreterWrapper(eg, input_types, output_locs, 0)
     else:
         raise NotImplementedError("invalid backend %s"%backend)
@@ -378,16 +427,18 @@ def run_compilation_pipeline(inputs, outputs, updates, givens):
     # Sort nodes so that shape elements appear before a given node
     nodes_sorted = topsorted_shapes_first(outputs_updatetargs_simple, analysis["node2shape"]) # XXX don't need shapes for byval ops
 
-    nodeFileName = 'nodeInfo'+'.txt'
-
-    nofo = open(nodeFileName, "w")
     nodeCount = 0
     node2s = {}
+    inplaceoutNode=[]
     for curNode in nodes_sorted:
         curStr= cgt.display._get_expr(curNode,node2s)
         print nodeCount,'\t',curStr
         nodeCount = nodeCount+1
         print "\n"
+        if outputs_updatetargs_simple.__contains__(curNode):
+            print "outputNode"
+            inplaceoutNode.append(curNode)
+
     instr2node = {}
 
     print nodeCount,'total number of node'
@@ -406,58 +457,10 @@ def run_compilation_pipeline(inputs, outputs, updates, givens):
         print 'begin'
         print '\n'.join(str(i)+'.) \t'+repr(instr) for (i,instr) in enumerate(eg.instrs))
         print 'end'
-    global functionNum
-    funcFileName = 'foo'+str(functionNum)+'.txt'
-    functionNum = functionNum+1
-    fo = open(funcFileName, "w")
-    opOccurrence = {}
-    nci_list=[]
-    print instr2node.items()
-
-
-
-    for (i,instr) in enumerate(eg.instrs):
-        print '\n'+str(i)+'.) \t'+repr(instr)
-        originalnode = instr2node[instr]
-        print originalnode
-        #curStr= cgt.display._get_expr(originalnode,node2s)
-        #print curStr
-        if isinstance(instr, LoadArgument):
-            print 'load argument'
-            continue
-        if isinstance(instr, Alloc):
-            print 'alloc'
-            continue
-        if isinstance(instr, BuildTup):
-            print 'buildTup'
-            continue
-        if isinstance(instr, ReturnByRef) or isinstance(instr, ReturnByVal)\
-                or isinstance(instr, BuildTup):
-            print instr.op.get_name()
-            callable_str = get_callable(instr.op, instr.input_types, "cpu", False, True,nci_list)
-            if isinstance(callable_str,basestring):
-                prefix = 'func'+str(i)
-                d = dict(function=_funcname(prefix), closure=_closurename(prefix),setup=_setupname(prefix),teardown=_teardownname(prefix))
-                fn_srcfile = core.SrcFile("c++",string.Template(callable_str).substitute(d))
-                fo.write(' \n')
-                fo.write( fn_srcfile.code)
-                fo.write('\n')
-            else:
-                print 'python implement'
-        else:
-            print 'I dont noe'
-        # we wanna create a summary of what operator to instantiate
-
-
-    #    print node.op
-    #    callable = get_callable(node.op, [par.typ for par in node.parents], "cpu")
-        #nci = node.op.get_native_compile_info([par.typ for par in node.parents], "cpu")
-        #template_code = gen_templated_code(nci.includes, nci.closure_triples, nci.func_code)
-        #compile_info = get_compile_info()
 
     # Phase 3: create C or Python interpreter for graph
     # ------------------------------------------------------
-    interp = create_interpreter(inputs, outputs_simple, eg, node2memloc)
+    interp = create_interpreter(inputs, outputs_simple, eg, node2memloc, instr2node, inplaceoutNode)
 
     # Done!
     return interp
